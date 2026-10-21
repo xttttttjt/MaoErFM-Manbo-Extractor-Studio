@@ -1,0 +1,8 @@
+{
+  "name": "MaoErFM/Manbo Extractor Studio (final edition (?) idk)",
+  "description": "inspired by @celine.wang94, further adjusted by @xttttttjt_ (on threads)",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

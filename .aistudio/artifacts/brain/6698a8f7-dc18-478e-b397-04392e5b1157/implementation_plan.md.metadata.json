@@ -1,0 +1,6 @@
+{
+  "summary":  "Revised implementation plan leveraging direct Drama ID resolution from web_manbo/dramaDetail?dramaId=..., unlocking official LRC subtitles for all locked episodes without authentication blockers, offering multi-format subtitle exports (SRT, LRC, VTT, TXT, JSON, Bilingual), multi-credential session pass-through, and direct media/stream ingestion for audio export in M4A, MP3, and WAV.",
+  "updatedAt":  "2026-10-21T01:04:40.785392417Z",
+  "requestFeedback":  true,
+  "userFacing":  true
+}
