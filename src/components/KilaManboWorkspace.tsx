@@ -27,6 +27,7 @@ import {
   Lock,
   Copy,
   Layers,
+  FolderArchive,
   Upload,
   Link as LinkIcon,
   Music,
@@ -232,6 +233,10 @@ export const KilaManboWorkspace: React.FC<KilaManboWorkspaceProps> = ({
     searchQuery: '',
   });
 
+  // Tab Mode (1:1 parity with MissEvan tab): 'single' | 'drama'
+  const [activeTabMode, setActiveTabMode] = useState<'single' | 'drama'>('single');
+  const [batchModalInitialScope, setBatchModalInitialScope] = useState<'single' | 'series'>('series');
+
   // Cover modal & Batch download modal
   const [showCoverModal, setShowCoverModal] = useState(false);
   const [coverToPreview, setCoverToPreview] = useState<string>('');
@@ -276,15 +281,28 @@ export const KilaManboWorkspace: React.FC<KilaManboWorkspaceProps> = ({
       const drama: KilaManboDramaDetail = json.drama;
       setDramaData(drama);
 
-      // Smart auto-select first episode:
-      // Prefer the first episode with official subtitles (LRC) and substantial audio duration, fallback to first episode
-      if (Array.isArray(drama.setRespList) && drama.setRespList.length > 0) {
-        const preferredEp =
+      // Smart auto-select episode:
+      // If the URL or input had a single episode (decryptedParams.dramaSetId or direct match), select that episode!
+      let targetEp: KilaManboEpisode | undefined = undefined;
+      if (json.decryptedParams?.dramaSetId) {
+        const sid = String(json.decryptedParams.dramaSetId).trim();
+        targetEp = drama.setRespList?.find((e) => String(e.setIdStr || e.setId).trim() === sid);
+      }
+      if (!targetEp && activeTabMode === 'single') {
+        const cleanedTarget = target.replace(/[^0-9]/g, '');
+        if (cleanedTarget) {
+          targetEp = drama.setRespList?.find((e) => String(e.setIdStr || e.setId).trim() === cleanedTarget);
+        }
+      }
+      if (!targetEp && Array.isArray(drama.setRespList) && drama.setRespList.length > 0) {
+        targetEp =
           drama.setRespList.find((e) => e.setLrcUrl && e.duration && e.duration > 180000) ||
           drama.setRespList.find((e) => e.setLrcUrl) ||
           drama.setRespList.find((e) => e.duration && e.duration > 60000) ||
           drama.setRespList[0];
-        handleSelectEpisode(preferredEp, drama);
+      }
+      if (targetEp) {
+        handleSelectEpisode(targetEp, drama);
       }
     } catch (err: any) {
       logManboInterceptor('RESOLVE', {
@@ -535,6 +553,41 @@ export const KilaManboWorkspace: React.FC<KilaManboWorkspaceProps> = ({
     translationsMap,
     targetLang,
   ]);
+
+  // Quick single-line translation on demand with saved engine preference
+  const handleQuickTranslateLine = async (item: MissEvanDanmakuItem) => {
+    let savedEngine = 'gemini';
+    try {
+      savedEngine = localStorage.getItem('subtitle_translation_engine') || 'gemini';
+    } catch {
+      // ignore
+    }
+
+    const res = await fetch('/api/subtitles/translate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        items: [{ id: item.id, text: item.text, role: item.role }],
+        targetLang,
+        engine: savedEngine,
+        dramaContext: dramaData?.title,
+      }),
+    });
+
+    if (res.ok) {
+      const json = await res.json();
+      if (json.success && Array.isArray(json.data) && json.data.length > 0) {
+        const tr = json.data[0];
+        setTranslationsMap((prev) => ({
+          ...prev,
+          [item.id]: {
+            text: tr.translated,
+            role: tr.translatedRole,
+          },
+        }));
+      }
+    }
+  };
 
   // Audio Playback Controls
   const togglePlay = () => {
@@ -895,20 +948,79 @@ export const KilaManboWorkspace: React.FC<KilaManboWorkspaceProps> = ({
             {t('manboSubtitle')}
           </p>
 
+          {/* Mode Switcher Tabs (Single Track vs Series Drama - 1:1 Parity with MissEvan) */}
+          <div className="flex items-center justify-center pt-1">
+            <div className="inline-flex items-center gap-1.5 p-1 bg-[#040e09] border border-[#143a25] rounded-xl text-xs shadow-inner">
+              <button
+                type="button"
+                onClick={() => setActiveTabMode('single')}
+                className={`px-4 py-1.5 rounded-lg font-heading font-semibold transition-all cursor-pointer flex items-center gap-1.5 ${
+                  activeTabMode === 'single'
+                    ? 'bg-gradient-to-r from-emerald-500 to-teal-400 text-slate-950 shadow-md shadow-emerald-950/60 font-bold'
+                    : 'text-slate-400 hover:text-emerald-300'
+                }`}
+              >
+                <Compass className="w-3.5 h-3.5" />
+                <span>{t('singleTrackTab')}</span>
+                {selectedEpisode && (
+                  <span
+                    className={`ml-1 px-1.5 py-0.2 rounded-full text-[10px] font-mono border ${
+                      activeTabMode === 'single'
+                        ? 'bg-emerald-950 text-emerald-200 border-emerald-800/80'
+                        : 'bg-[#06180e] text-emerald-400 border-emerald-600/40'
+                    }`}
+                  >
+                    {selectedEpisode.setTitle || selectedEpisode.setName || 'Ep'}
+                  </span>
+                )}
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setActiveTabMode('drama')}
+                className={`px-4 py-1.5 rounded-lg font-heading font-semibold transition-all cursor-pointer flex items-center gap-1.5 ${
+                  activeTabMode === 'drama'
+                    ? 'bg-gradient-to-r from-emerald-500 to-teal-400 text-slate-950 shadow-md shadow-emerald-950/60 font-bold'
+                    : 'text-slate-400 hover:text-emerald-300'
+                }`}
+              >
+                <FolderArchive className="w-3.5 h-3.5" />
+                <span>{t('seriesDramaTab')}</span>
+                {dramaData && (
+                  <span
+                    className={`ml-1 px-1.5 py-0.2 rounded-full text-[10px] font-mono border ${
+                      activeTabMode === 'drama'
+                        ? 'bg-emerald-950 text-emerald-200 border-emerald-800/80'
+                        : 'bg-[#06180e] text-emerald-400 border-emerald-600/40'
+                    }`}
+                  >
+                    {dramaData.setRespList?.length ?? 0}
+                  </span>
+                )}
+              </button>
+            </div>
+          </div>
+
           {/* Search / Input Box */}
           <form
             onSubmit={(e) => {
               e.preventDefault();
               handleFetchDrama();
             }}
-            className="pt-2 max-w-3xl mx-auto flex flex-col sm:flex-row items-stretch gap-2.5"
+            className="pt-1 max-w-3xl mx-auto flex flex-col sm:flex-row items-stretch gap-2.5"
           >
             <div className="relative flex-1">
               <input
                 type="text"
                 value={inputUrl}
                 onChange={(e) => setInputUrl(e.target.value)}
-                placeholder={t('manboInputPlaceholder')}
+                placeholder={
+                  activeTabMode === 'single'
+                    ? (language === 'vi'
+                        ? 'Dán link tập KilaManbo (...detail?id=...&dramaSetId=...) hoặc DramaSet ID...'
+                        : 'Paste KilaManbo single track URL (...detail?id=...&dramaSetId=...) or Episode ID...')
+                    : t('manboInputPlaceholder')
+                }
                 className="w-full h-12 pl-4 pr-10 rounded-xl bg-[#040c08] border border-[#143523] focus:border-emerald-400 text-white placeholder-slate-500 text-xs sm:text-sm font-mono focus:outline-none shadow-inner transition-colors"
               />
               <Search className="absolute right-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-emerald-500/60 pointer-events-none" />
@@ -927,32 +1039,115 @@ export const KilaManboWorkspace: React.FC<KilaManboWorkspaceProps> = ({
               ) : (
                 <>
                   <Compass className="w-4 h-4 text-slate-950" />
-                  <span>{t('manboLoadPayload')}</span>
+                  <span>
+                    {activeTabMode === 'single'
+                      ? (language === 'vi' ? 'Trích Xuất Tập Lẻ' : 'Extract Single Track')
+                      : t('manboLoadPayload')}
+                  </span>
                 </>
               )}
             </button>
           </form>
 
-          {/* Action Ribbon & Neutral Help */}
+          {/* Quick Demo Presets */}
+          <div className="flex flex-wrap items-center justify-center gap-2 text-xs text-slate-400 pt-0.5">
+            <span className="text-slate-500 text-[11px] font-mono">
+              {activeTabMode === 'single'
+                ? (language === 'vi' ? 'Tập lẻ mẫu:' : 'Sample single track:')
+                : t('manboDemoLabel')}
+            </span>
+            {activeTabMode === 'single' ? (
+              <>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setInputUrl('https://www.kilamanbo.world/manbo/pc/detail?id=2235647356781461610&dramaSetId=2235647356781461611');
+                    handleFetchDrama('https://www.kilamanbo.world/manbo/pc/detail?id=2235647356781461610&dramaSetId=2235647356781461611');
+                  }}
+                  className="px-2.5 py-0.5 rounded-lg bg-[#05170d] hover:bg-[#092617] border border-emerald-600/60 text-emerald-300 font-mono text-[11px] transition-colors cursor-pointer flex items-center gap-1 shadow-sm"
+                >
+                  <Sparkles className="w-3 h-3 text-emerald-400" />
+                  <span>尾钩 Ep 1 (2235647356781461611)</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setInputUrl('https://www.kilamanbo.world/manbo/pc/detail?id=2235647356781461610&dramaSetId=2235647356781461612');
+                    handleFetchDrama('https://www.kilamanbo.world/manbo/pc/detail?id=2235647356781461610&dramaSetId=2235647356781461612');
+                  }}
+                  className="px-2.5 py-0.5 rounded-lg bg-[#05170d] hover:bg-[#092617] border border-emerald-800 text-slate-300 font-mono text-[11px] transition-colors cursor-pointer flex items-center gap-1"
+                >
+                  <span>尾钩 Ep 2 (2235647356781461612)</span>
+                </button>
+              </>
+            ) : (
+              <>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setInputUrl('2235647356781461610');
+                    handleFetchDrama('2235647356781461610');
+                  }}
+                  className="px-2.5 py-0.5 rounded-lg bg-[#05170d] hover:bg-[#092617] border border-emerald-600/60 text-emerald-300 font-mono text-[11px] transition-colors cursor-pointer flex items-center gap-1 shadow-sm"
+                >
+                  <Sparkles className="w-3 h-3 text-emerald-400" />
+                  <span>尾钩 Trọn Bộ (2235647356781461610)</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setInputUrl('1746208889815048192');
+                    handleFetchDrama('1746208889815048192');
+                  }}
+                  className="px-2.5 py-0.5 rounded-lg bg-[#05170d] hover:bg-[#092617] border border-emerald-800 text-slate-300 font-mono text-[11px] transition-colors cursor-pointer flex items-center gap-1"
+                >
+                  <span>1746208889815048192</span>
+                </button>
+              </>
+            )}
+          </div>
+
+          {/* Action Ribbon & Payload Launchers with Scope Controls */}
           <div className="flex flex-wrap items-center justify-center gap-2 pt-1 text-xs text-slate-400">
             <span className="text-emerald-400/90 font-mono text-[11px] flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-[#05170d] border border-emerald-500/30">
               <Radio className="w-3.5 h-3.5 text-emerald-400 animate-pulse" />
               <span>
                 {language === 'vi'
-                  ? 'Hỗ trợ: Dán link kịch kilamanbo.world hoặc nhập thẳng Drama ID'
-                  : 'Supported: Paste any kilamanbo.world drama link or Drama ID'}
+                  ? 'Hỗ trợ: Link kịch, link tập lẻ hoặc nhập thẳng Drama ID'
+                  : 'Supported: Drama link, episode link, or Drama ID'}
               </span>
             </span>
+
+            {/* Launch Batch Modal for Single Track */}
             <button
               type="button"
-              onClick={() => setIsBatchOpen(true)}
-              disabled={!dramaData}
+              onClick={() => {
+                setBatchModalInitialScope('single');
+                setIsBatchOpen(true);
+              }}
+              disabled={!dramaData || !selectedEpisode}
               className="px-2.5 py-1 rounded-md bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/40 text-emerald-300 font-semibold cursor-pointer transition-colors flex items-center gap-1.5 disabled:opacity-40"
-              title="Mở bảng xuất hàng loạt kịch KilaManbo theo Drama ID"
+              title="Đóng gói trọn bộ âm thanh chất lượng cao + phụ đề + ảnh bìa của tập hiện tại thành file ZIP"
             >
-              <Layers className="w-3.5 h-3.5 text-emerald-400" />
-              <span>{language === 'vi' ? 'Tải Hàng Loạt (.ZIP)' : 'Batch Download (.ZIP)'}</span>
+              <Compass className="w-3.5 h-3.5 text-emerald-400" />
+              <span>{language === 'vi' ? 'Tải Gói 1 Tập (.ZIP)' : 'Single Track (.ZIP)'}</span>
             </button>
+
+            {/* Launch Batch Modal for Entire Drama Series */}
+            <button
+              type="button"
+              onClick={() => {
+                setBatchModalInitialScope('series');
+                setIsBatchOpen(true);
+              }}
+              disabled={!dramaData}
+              className="px-2.5 py-1 rounded-md bg-emerald-500/20 hover:bg-emerald-500/30 border border-emerald-500/50 text-emerald-300 font-semibold cursor-pointer transition-colors flex items-center gap-1.5 disabled:opacity-40 shadow-sm"
+              title="Đóng gói toàn bộ các tập của bộ kịch thành file ZIP hàng loạt"
+            >
+              <FolderArchive className="w-3.5 h-3.5 text-emerald-400" />
+              <span>{language === 'vi' ? 'Toàn Bộ Kịch (.ZIP)' : 'Whole Series (.ZIP)'}</span>
+            </button>
+
             {onOpenCookieModal && (
               <button
                 type="button"
@@ -1110,12 +1305,27 @@ export const KilaManboWorkspace: React.FC<KilaManboWorkspaceProps> = ({
                 </button>
                 <button
                   type="button"
-                  onClick={() => setIsBatchOpen(true)}
+                  onClick={() => {
+                    setBatchModalInitialScope('single');
+                    setIsBatchOpen(true);
+                  }}
+                  className="px-2.5 py-0.5 rounded-md text-xs font-semibold bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/40 text-emerald-300 flex items-center gap-1.5 transition-colors cursor-pointer"
+                  title="Tải gói 1 tập hiện tại (âm thanh + phụ đề + ảnh bìa)"
+                >
+                  <Compass className="w-3.5 h-3.5 text-emerald-400" />
+                  <span>{language === 'vi' ? 'Tập Này (.ZIP)' : 'This Ep (.ZIP)'}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setBatchModalInitialScope('series');
+                    setIsBatchOpen(true);
+                  }}
                   className="px-2.5 py-0.5 rounded-md text-xs font-semibold bg-emerald-500/20 hover:bg-emerald-500/30 border border-emerald-500/50 text-emerald-300 flex items-center gap-1.5 transition-colors cursor-pointer shadow-sm"
                   title="Xuất hàng loạt toàn bộ phụ đề, ảnh bìa và âm thanh của bộ kịch"
                 >
-                  <Layers className="w-3.5 h-3.5 text-emerald-400" />
-                  <span>{language === 'vi' ? 'Tải Hàng Loạt (.ZIP)' : 'Batch Download (.ZIP)'}</span>
+                  <FolderArchive className="w-3.5 h-3.5 text-emerald-400" />
+                  <span>{language === 'vi' ? 'Toàn Bộ Kịch (.ZIP)' : 'Whole Series (.ZIP)'}</span>
                 </button>
               </div>
 
@@ -1176,7 +1386,10 @@ export const KilaManboWorkspace: React.FC<KilaManboWorkspaceProps> = ({
                     )}
                     <button
                       type="button"
-                      onClick={() => setIsBatchOpen(true)}
+                      onClick={() => {
+                        setBatchModalInitialScope('series');
+                        setIsBatchOpen(true);
+                      }}
                       className="px-3.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-slate-950 text-xs font-bold transition-colors cursor-pointer shadow-md flex items-center gap-1.5"
                     >
                       <Layers className="w-3.5 h-3.5" />
@@ -1826,6 +2039,7 @@ export const KilaManboWorkspace: React.FC<KilaManboWorkspaceProps> = ({
             targetLang={targetLang}
             onDisplayModeChange={setDisplayMode}
             platform="kilamanbo"
+            onQuickTranslateLine={handleQuickTranslateLine}
             onUpdateTranslatedText={(id: string, newText: string) => {
               setTranslationsMap((prev) => ({
                 ...prev,
@@ -1855,7 +2069,14 @@ export const KilaManboWorkspace: React.FC<KilaManboWorkspaceProps> = ({
           customAudioSuccess={downloadSuccessToast}
           customAudioError={downloadError}
           isVipLocked={isPaidLocked}
-          onOpenVipModal={() => setIsBatchOpen(true)}
+          onOpenVipModal={() => {
+            setBatchModalInitialScope('series');
+            setIsBatchOpen(true);
+          }}
+          onOpenBatchModal={() => {
+            setBatchModalInitialScope('series');
+            setIsBatchOpen(true);
+          }}
           onOpenTranslateModal={() =>
             onOpenTranslateModal?.(
               filteredSubtitles,
@@ -1912,11 +2133,13 @@ export const KilaManboWorkspace: React.FC<KilaManboWorkspaceProps> = ({
         </div>
       )}
 
-      {/* KilaManbo Batch Multi-Episode Download Modal */}
+      {/* KilaManbo Batch Multi-Episode Download Modal with Scope & Packaging */}
       <ManboBatchDownloadModal
         isOpen={isBatchOpen}
         onClose={() => setIsBatchOpen(false)}
         drama={dramaData}
+        selectedEpisode={selectedEpisode}
+        initialScope={batchModalInitialScope}
       />
     </div>
   );

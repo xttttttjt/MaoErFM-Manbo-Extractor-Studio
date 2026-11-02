@@ -3,6 +3,7 @@ import { GoogleGenAI, Type } from "@google/genai";
 const ai = new GoogleGenAI({});
 
 export type SubtitleTargetLanguage = "vi" | "en" | "es";
+export type SubtitleTranslationEngine = "gemini" | "google";
 
 export interface TranslateItemInput {
   id: string;
@@ -16,7 +17,7 @@ export interface TranslateItemOutput {
   translated: string;
   role?: string;
   translatedRole?: string;
-  engine?: "gemini" | "neural_fast";
+  engine?: "gemini" | "google" | "neural_fast";
 }
 
 const LANGUAGE_LABELS: Record<SubtitleTargetLanguage, { name: string; nativeName: string; code: string; instructions: string }> = {
@@ -442,18 +443,155 @@ async function translateChunk(
 }
 
 /**
+ * Translates items using the Google Translate / Strict Literal Translation Engine
+ * Enforces strict, verbatim dictionary meaning without creative AI embellishments or invented subtext.
+ */
+async function translateWithGoogleEngine(
+  items: TranslateItemInput[],
+  targetLang: SubtitleTargetLanguage
+): Promise<TranslateItemOutput[]> {
+  const langConfig = LANGUAGE_LABELS[targetLang] || LANGUAGE_LABELS.vi;
+
+  // Method 1: Strict Literal Translation Mode (Temperature 0.0 with verbatim constraints)
+  try {
+    const literalSystemInstruction = `You are an exact, literal machine translation engine equivalent to Google Translate.
+Your task is to translate Chinese audio drama dialogue into ${langConfig.name} (${langConfig.nativeName}) with STRICT VERBATIM LITERAL ACCURACY.
+
+CRITICAL CONSTRAINTS:
+1. Translate LITERALLY, word-for-word, faithful exclusively to the raw dictionary meaning.
+2. DO NOT interpret, embellish, poeticize, or invent ANY dramatic meaning, slang, emotional inferences, or dialogue that is not explicitly stated in the source Chinese characters.
+3. Keep character names translated into standard Sino-Vietnamese (for Vietnamese) or standard Pinyin (for English/Spanish).
+4. Translate standard audio drama roles literally:
+   - 官方台词 -> ${targetLang === "vi" ? "Lời thoại chính thức" : targetLang === "es" ? "Diálogo oficial" : "Official Subtitles"}
+   - 音效/场景 -> ${targetLang === "vi" ? "Âm thanh / Bối cảnh" : targetLang === "es" ? "Efectos / Escena" : "SFX / Scene"}
+   - 旁白 -> ${targetLang === "vi" ? "Lời dẫn" : targetLang === "es" ? "Narrador" : "Narrator"}
+   - 报幕 -> ${targetLang === "vi" ? "Giới thiệu tập" : targetLang === "es" ? "Presentación" : "Episode Intro"}
+5. Return a strict JSON array where each object has "id", "translated", and "translatedRole".`;
+
+    const userPrompt = JSON.stringify(
+      items.map((i) => ({
+        id: i.id,
+        role: i.role || "",
+        text: i.text,
+      }))
+    );
+
+    const generateConfig: any = {
+      systemInstruction: literalSystemInstruction,
+      temperature: 0.0, // Zero temperature to eliminate creative freedom and prevent hallucinated meaning
+      responseMimeType: "application/json",
+      responseSchema: {
+        type: Type.ARRAY,
+        items: {
+          type: Type.OBJECT,
+          properties: {
+            id: { type: Type.STRING },
+            translated: { type: Type.STRING },
+            translatedRole: { type: Type.STRING },
+          },
+          required: ["id", "translated"],
+        },
+      },
+    };
+
+    const response = await Promise.race([
+      ai.models.generateContent({
+        model: "gemini-3.5-flash-lite",
+        contents: [
+          {
+            role: "user",
+            parts: [{ text: `Strict literal translation into ${langConfig.name}:\n${userPrompt}` }],
+          },
+        ],
+        config: generateConfig,
+      }),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error("Timeout")), 14000)),
+    ]);
+
+    const text = response.text?.trim() || "[]";
+    const parsed = JSON.parse(text);
+
+    if (Array.isArray(parsed) && parsed.length > 0) {
+      const parsedMap = new Map<string, { translated: string; translatedRole?: string }>();
+      for (const p of parsed) {
+        if (p && typeof p.id === "string") {
+          parsedMap.set(p.id, {
+            translated: (p.translated || "").trim(),
+            translatedRole: (p.translatedRole || "").trim() || undefined,
+          });
+        }
+      }
+
+      return items.map((item) => {
+        const found = parsedMap.get(item.id);
+        const translatedStr = found?.translated || item.text;
+        const translatedRole = found?.translatedRole || translateRoleName(item.role, targetLang);
+        return {
+          id: item.id,
+          original: item.text,
+          translated: targetLang === "vi" ? polishVietnameseDialogue(translatedStr) : translatedStr,
+          role: item.role,
+          translatedRole,
+          engine: "google" as const,
+        };
+      });
+    }
+  } catch (err) {
+    console.warn("Strict literal engine fell back to MyMemory API:", err);
+  }
+
+  // Method 2: Fast Neural Translation API fallback (concurrent batch)
+  const outputs: TranslateItemOutput[] = [];
+  const CONCURRENCY = 4;
+  for (let i = 0; i < items.length; i += CONCURRENCY) {
+    const batch = items.slice(i, i + CONCURRENCY);
+    const batchResults = await Promise.all(
+      batch.map(async (item) => {
+        const translatedRole = translateRoleName(item.role, targetLang);
+        try {
+          const translated = await translateFastEngine(item.text, targetLang);
+          return {
+            id: item.id,
+            original: item.text,
+            translated: targetLang === "vi" ? polishVietnameseDialogue(translated) : translated,
+            role: item.role,
+            translatedRole,
+            engine: "google" as const,
+          };
+        } catch {
+          return {
+            id: item.id,
+            original: item.text,
+            translated: targetLang === "vi" ? polishVietnameseDialogue(item.text) : item.text,
+            role: item.role,
+            translatedRole,
+            engine: "google" as const,
+          };
+        }
+      })
+    );
+    outputs.push(...batchResults);
+    if (i + CONCURRENCY < items.length) {
+      await new Promise((r) => setTimeout(r, 150));
+    }
+  }
+
+  return outputs;
+}
+
+/**
  * Main translation dispatcher that chunks subtitle sets and returns translated lines
  */
 export async function translateSubtitles(
   items: TranslateItemInput[],
   targetLang: SubtitleTargetLanguage,
   dramaContext?: string,
+  engine: SubtitleTranslationEngine = "gemini",
   onProgress?: (processed: number, total: number) => void
 ): Promise<TranslateItemOutput[]> {
   if (!items || items.length === 0) return [];
 
-  // Optimal batch size for ultra-fast, high-reliability response
-  const BATCH_SIZE = 15;
+  const BATCH_SIZE = engine === "google" ? 20 : 15;
   const chunks: TranslateItemInput[][] = [];
   for (let i = 0; i < items.length; i += BATCH_SIZE) {
     chunks.push(items.slice(i, i + BATCH_SIZE));
@@ -463,7 +601,11 @@ export async function translateSubtitles(
   let processed = 0;
 
   for (const chunk of chunks) {
-    const chunkResults = await translateChunk(chunk, targetLang, dramaContext);
+    const chunkResults =
+      engine === "google"
+        ? await translateWithGoogleEngine(chunk, targetLang)
+        : await translateChunk(chunk, targetLang, dramaContext);
+
     results.push(...chunkResults);
     processed += chunk.length;
     if (onProgress) {

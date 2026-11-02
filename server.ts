@@ -6,7 +6,7 @@ import crypto from "crypto";
 import { Transform } from "stream";
 import { createRequire } from "module";
 
-import { translateSubtitles, type SubtitleTargetLanguage } from "./src/server/translationService.ts";
+import { translateSubtitles, type SubtitleTargetLanguage, type SubtitleTranslationEngine } from "./src/server/translationService.ts";
 import { decryptKilaManboUrl, decryptKilaManboAudioUrl, parseKilaManboLrcString } from "./src/server/kilamanboCrypto.ts";
 
 dotenv.config();
@@ -951,10 +951,10 @@ app.get("/api/manbo/audio-proxy", async (req, res) => {
   }
 });
 
-// API: Subtitle Translation Tool (Vietnamese / English / Spanish) powered by Gemini
+// API: Subtitle Translation Tool (Vietnamese / English / Spanish) powered by Gemini AI or Google Translate
 app.post("/api/subtitles/translate", async (req, res) => {
   try {
-    const { items, targetLang, dramaContext } = req.body || {};
+    const { items, targetLang, dramaContext, engine } = req.body || {};
 
     if (!Array.isArray(items) || items.length === 0) {
       return res.status(400).json({ error: "Danh sách phụ đề cần dịch không được để trống (items array required)." });
@@ -966,6 +966,8 @@ app.post("/api/subtitles/translate", async (req, res) => {
       return res.status(400).json({ error: "Ngôn ngữ đích không hợp lệ. Hỗ trợ: 'vi', 'en', 'es'." });
     }
 
+    const selectedEngine: SubtitleTranslationEngine = engine === "google" ? "google" : "gemini";
+
     // Limit maximum lines per call to 600 for safe bounds
     const safeItems = items.slice(0, 600).map((it, idx) => ({
       id: String(it.id || idx + 1),
@@ -974,14 +976,15 @@ app.post("/api/subtitles/translate", async (req, res) => {
     })).filter(it => it.text.length > 0);
 
     if (safeItems.length === 0) {
-      return res.json({ success: true, targetLang: lang, count: 0, data: [] });
+      return res.json({ success: true, targetLang: lang, engine: selectedEngine, count: 0, data: [] });
     }
 
-    const translated = await translateSubtitles(safeItems, lang, dramaContext);
+    const translated = await translateSubtitles(safeItems, lang, dramaContext, selectedEngine);
 
     return res.json({
       success: true,
       targetLang: lang,
+      engine: selectedEngine,
       count: translated.length,
       data: translated,
     });
@@ -1548,7 +1551,18 @@ function createCbcsDecryptStream(key: Buffer, iv: Buffer): Transform {
   });
 }
 
-interface ResolvedAudioSource {
+export interface AudioTrackOption {
+  id: number | string;
+  bandwidth: number;
+  bitrateKbps: number;
+  label: string;
+  size?: number | null;
+  codecs?: string;
+  streamUrl: string;
+  bilidrmUri?: string | null;
+}
+
+export interface ResolvedAudioSource {
   title: string;
   streamUrl: string | null;
   format: string;
@@ -1556,18 +1570,23 @@ interface ResolvedAudioSource {
   bilidrmUri?: string | null;
   isPaid?: boolean;
   price?: number;
+  bitrateKbps?: number;
+  qualityLabel?: string;
+  availableTracks?: AudioTrackOption[];
   expiresAt: number;
 }
 
 const resolvedAudioCache = new Map<string, ResolvedAudioSource>();
 
-// Helper: Resolve direct audio stream for a given sound ID
+// Helper: Resolve direct audio stream for a given sound ID (extracts highest bitrate / master track)
 async function resolveAudioSource(
   soundId: string,
-  reqCookie?: string
+  reqCookie?: string,
+  qualityPref?: string
 ): Promise<ResolvedAudioSource> {
   const effectiveCookie = normalizeMissEvanCookie(reqCookie || savedMissEvanCookie);
-  const cacheKey = `${soundId}::${effectiveCookie}`;
+  const normalizedPref = (qualityPref || "highest").toLowerCase();
+  const cacheKey = `${soundId}::${effectiveCookie}::${normalizedPref}`;
   const cached = resolvedAudioCache.get(cacheKey);
   if (cached && cached.expiresAt > Date.now() && cached.streamUrl) {
     return cached;
@@ -1589,19 +1608,66 @@ async function resolveAudioSource(
 
   const title = sound.soundstr || `sound_${soundId}`;
   const expiresAt = Date.now() + 10 * 60 * 1000;
+  const durationSec = typeof sound.duration === "number" && sound.duration > 0 ? sound.duration : 0;
 
-  // Priority 1: dash.audio (contains direct CDN .m4s ISO MP4/M4A stream and exact file size)
+  // Priority 1: dash.audio (contains direct CDN .m4s ISO MP4/M4A streams, exact file sizes & multi-bitrate tracks)
   if (Array.isArray(sound.dash?.audio) && sound.dash.audio.length > 0) {
-    const track128 =
-      sound.dash.audio.find((a: any) => a.id === 128 && a.base_url) ||
-      sound.dash.audio.find((a: any) => a.base_url);
-    if (track128 && typeof track128.base_url === "string" && track128.base_url.startsWith("http")) {
+    const validTracks: AudioTrackOption[] = [];
+    for (const a of sound.dash.audio) {
+      if (a && typeof a.base_url === "string" && a.base_url.startsWith("http")) {
+        let kbps = 0;
+        if (typeof a.bandwidth === "number" && a.bandwidth > 0) {
+          kbps = Math.round(a.bandwidth / 1000);
+        } else if (typeof a.size === "number" && a.size > 0 && durationSec > 0) {
+          kbps = Math.round((a.size * 8) / (durationSec * 1000));
+        } else if (typeof a.id === "number") {
+          kbps = a.id === 64 ? 328 : a.id;
+        }
+
+        const isOriginal =
+          (typeof a.base_url === "string" && a.base_url.includes("-original")) ||
+          a.id === 64 ||
+          kbps >= 300;
+        const label = isOriginal
+          ? `${kbps} kbps (Bản Gốc / Master)`
+          : kbps >= 128
+          ? `${kbps} kbps (Tiêu chuẩn)`
+          : `${kbps} kbps`;
+
+        validTracks.push({
+          id: a.id,
+          bandwidth: a.bandwidth || (kbps * 1000),
+          bitrateKbps: kbps,
+          label,
+          size: typeof a.size === "number" ? a.size : null,
+          codecs: a.codecs,
+          streamUrl: a.base_url,
+          bilidrmUri: typeof a.bilidrm_uri === "string" ? a.bilidrm_uri : null,
+        });
+      }
+    }
+
+    if (validTracks.length > 0) {
+      // Sort tracks: highest bandwidth first, then largest size first
+      validTracks.sort((t1, t2) => (t2.bandwidth - t1.bandwidth) || ((t2.size || 0) - (t1.size || 0)));
+
+      let chosenTrack: AudioTrackOption;
+      if (normalizedPref === "128" || normalizedPref === "standard") {
+        chosenTrack = validTracks.find((t) => t.bitrateKbps <= 160) || validTracks[validTracks.length - 1];
+      } else {
+        // Default to HIGHEST available quality (e.g. 413 kbps / 328 kbps original studio stream)
+        chosenTrack = validTracks[0];
+      }
+
       const resObj: ResolvedAudioSource = {
         title,
-        streamUrl: track128.base_url,
+        streamUrl: chosenTrack.streamUrl,
         format: "m4a",
-        contentLength: typeof track128.size === "number" ? track128.size : null,
-        bilidrmUri: typeof track128.bilidrm_uri === "string" ? track128.bilidrm_uri : null,
+        bitrateKbps: chosenTrack.bitrateKbps,
+        qualityLabel: chosenTrack.label,
+        availableTracks: validTracks,
+        contentLength: chosenTrack.size,
+        bilidrmUri: chosenTrack.bilidrmUri,
         isPaid: false,
         expiresAt,
       };
@@ -1616,6 +1682,8 @@ async function resolveAudioSource(
       title,
       streamUrl: sound.videourl,
       format: "m4a",
+      bitrateKbps: 320,
+      qualityLabel: "320 kbps (High Quality)",
       isPaid: false,
       expiresAt,
     };
@@ -1623,8 +1691,14 @@ async function resolveAudioSource(
     return resObj;
   }
 
-  // Priority 3: candidate audio urls (soundurl_128, soundurl, soundurl_64)
-  const candidateUrl = sound.soundurl_128 || sound.soundurl || sound.soundurl_64;
+  // Priority 3: candidate audio urls
+  // Notice: In MissEvan, sound.soundurl points to original high-quality stream (or master HLS mapping to -original.m4s),
+  // whereas soundurl_128 is specifically downsampled to 128kbps.
+  const candidateUrl =
+    normalizedPref === "128" || normalizedPref === "standard"
+      ? sound.soundurl_128 || sound.soundurl || sound.soundurl_64
+      : sound.soundurl || sound.soundurl_320 || sound.soundurl_128 || sound.soundurl_64;
+
   if (!candidateUrl) {
     return {
       title,
@@ -1641,15 +1715,48 @@ async function resolveAudioSource(
     const m3u8Res = await fetch(candidateUrl, { headers });
 
     if (m3u8Res.ok) {
-      const text = await m3u8Res.text();
+      let text = await m3u8Res.text();
+
+      // If master multi-variant playlist, choose highest bandwidth sub-playlist
+      if (text.includes("#EXT-X-STREAM-INF")) {
+        const lines = text.split("\n");
+        let highestVariantUrl = "";
+        let maxBw = 0;
+        for (let i = 0; i < lines.length; i++) {
+          const line = lines[i].trim();
+          if (line.startsWith("#EXT-X-STREAM-INF")) {
+            const bwMatch = line.match(/BANDWIDTH=(\d+)/);
+            const bw = bwMatch ? parseInt(bwMatch[1], 10) : 0;
+            const next = (lines[i + 1] || "").trim();
+            if (next && !next.startsWith("#")) {
+              if (bw >= maxBw || !highestVariantUrl) {
+                maxBw = bw;
+                highestVariantUrl = next.startsWith("http")
+                  ? next
+                  : new URL(next, candidateUrl).toString();
+              }
+            }
+          }
+        }
+        if (highestVariantUrl) {
+          const subRes = await fetch(highestVariantUrl, { headers });
+          if (subRes.ok) text = await subRes.text();
+        }
+      }
+
       // Bento4 / MaoEr CDN mp4-dash container
       const mapMatch = text.match(/#EXT-X-MAP:URI="([^"]+)"/);
       if (mapMatch && mapMatch[1]) {
         const keyMatch = text.match(/URI="uri:skd:\/\/([^"]+)"/);
+        const streamUrl = mapMatch[1];
+        const isOrig = streamUrl.includes("-original") || candidateUrl.includes("quality_id=64");
+        const bitrateKbps = isOrig ? 328 : 128;
         const resObj: ResolvedAudioSource = {
           title,
-          streamUrl: mapMatch[1],
+          streamUrl,
           format: "m4a",
+          bitrateKbps,
+          qualityLabel: isOrig ? `${bitrateKbps} kbps (Bản Gốc / Master)` : `${bitrateKbps} kbps`,
           bilidrmUri: keyMatch && keyMatch[1] ? `uri:bili://${keyMatch[1]}` : null,
           isPaid: false,
           expiresAt,
@@ -1671,6 +1778,8 @@ async function resolveAudioSource(
           title,
           streamUrl: segUrl,
           format: "m4a",
+          bitrateKbps: 320,
+          qualityLabel: "320 kbps (High Quality)",
           isPaid: false,
           expiresAt,
         };
@@ -1685,6 +1794,8 @@ async function resolveAudioSource(
     title,
     streamUrl: candidateUrl,
     format,
+    bitrateKbps: 320,
+    qualityLabel: "320 kbps (High Quality)",
     isPaid: false,
     expiresAt,
   };
@@ -1692,7 +1803,7 @@ async function resolveAudioSource(
   return resObj;
 }
 
-// API: Get audio file info (size, direct URL, title, VIP status)
+// API: Get audio file info (size, direct URL, title, VIP status, bitrate)
 app.get("/api/missevan/audio/:id/info", async (req, res) => {
   const soundId = req.params.id;
   if (!soundId || !/^\d+$/.test(soundId)) {
@@ -1701,7 +1812,8 @@ app.get("/api/missevan/audio/:id/info", async (req, res) => {
 
   try {
     const reqCookie = typeof req.headers["x-missevan-cookie"] === "string" ? req.headers["x-missevan-cookie"] : undefined;
-    const audioInfo = await resolveAudioSource(soundId, reqCookie);
+    const qualityPref = typeof req.query.quality === "string" ? req.query.quality : undefined;
+    const audioInfo = await resolveAudioSource(soundId, reqCookie, qualityPref);
 
     if (audioInfo.isPaid || !audioInfo.streamUrl) {
       return res.status(200).json({
@@ -1736,8 +1848,11 @@ app.get("/api/missevan/audio/:id/info", async (req, res) => {
       soundId,
       title: audioInfo.title,
       format: audioInfo.format,
+      bitrateKbps: audioInfo.bitrateKbps,
+      qualityLabel: audioInfo.qualityLabel,
+      availableTracks: audioInfo.availableTracks,
       contentLength,
-      downloadUrl: `/api/missevan/audio/${soundId}/download`,
+      downloadUrl: `/api/missevan/audio/${soundId}/download${qualityPref ? `?quality=${qualityPref}` : ""}`,
     });
   } catch (err: any) {
     return res.status(200).json({
@@ -1768,7 +1883,7 @@ async function getDecryptedAudioRange(
   start: number,
   end: number
 ): Promise<{ slice: Buffer; start: number; end: number; totalBytes: number }> {
-  const entryKey = `${soundId}::${audioInfo.bilidrmUri || ""}`;
+  const entryKey = `${soundId}::${audioInfo.streamUrl || audioInfo.bilidrmUri || ""}`;
 
   if (
     !activeDecryptedEntry ||
@@ -1883,8 +1998,9 @@ app.get("/api/missevan/audio/:id/download", async (req, res) => {
     const reqCookie =
       (typeof req.query.cookie === "string" ? req.query.cookie : undefined) ||
       (typeof req.headers["x-missevan-cookie"] === "string" ? req.headers["x-missevan-cookie"] : undefined);
+    const qualityPref = typeof req.query.quality === "string" ? req.query.quality : undefined;
 
-    const audioInfo = await resolveAudioSource(soundId, reqCookie);
+    const audioInfo = await resolveAudioSource(soundId, reqCookie, qualityPref);
 
     if (audioInfo.isPaid || !audioInfo.streamUrl) {
       return res.status(403).json({

@@ -1,3 +1,13 @@
+export interface AudioTrackOption {
+  id: number | string;
+  bandwidth: number;
+  bitrateKbps: number;
+  label: string;
+  size?: number | null;
+  codecs?: string;
+  streamUrl?: string;
+}
+
 export interface AudioFileInfo {
   success: boolean;
   isPaid?: boolean;
@@ -5,6 +15,9 @@ export interface AudioFileInfo {
   soundId: string;
   title: string;
   format: 'm4a' | 'mp3';
+  bitrateKbps?: number;
+  qualityLabel?: string;
+  availableTracks?: AudioTrackOption[];
   contentLength?: number | null;
   downloadUrl?: string;
   error?: string;
@@ -277,14 +290,15 @@ export function formatFileSize(bytes?: number | null): string {
   return `${mb.toFixed(1)} MB`;
 }
 
-export async function fetchAudioInfo(soundId: string): Promise<AudioFileInfo> {
+export async function fetchAudioInfo(soundId: string, quality?: string): Promise<AudioFileInfo> {
   const cookie = getSavedMissEvanCookie();
   const headers: Record<string, string> = {};
   if (cookie) {
     headers['x-missevan-cookie'] = cookie;
   }
 
-  const res = await fetch(`/api/missevan/audio/${soundId}/info`, { headers });
+  const query = quality ? `?quality=${encodeURIComponent(quality)}` : '';
+  const res = await fetch(`/api/missevan/audio/${soundId}/info${query}`, { headers });
   const data = await res.json().catch(() => ({
     success: false,
     soundId,
@@ -303,9 +317,10 @@ export async function fetchAudioInfo(soundId: string): Promise<AudioFileInfo> {
 export async function safeTriggerAudioDownload(
   soundId: string,
   customName?: string,
-  onProgress?: (percent: number, loaded: number, total: number) => void
+  onProgress?: (percent: number, loaded: number, total: number) => void,
+  quality?: string
 ): Promise<{ ok: boolean; isPaid?: boolean; error?: string }> {
-  const info = await fetchAudioInfo(soundId);
+  const info = await fetchAudioInfo(soundId, quality);
   if (!info.success || info.isPaid) {
     return {
       ok: false,
@@ -317,7 +332,7 @@ export async function safeTriggerAudioDownload(
   }
 
   try {
-    const { blob, filename } = await fetchAudioBlob(soundId, onProgress, customName, info);
+    const { blob, filename } = await fetchAudioBlob(soundId, onProgress, customName, info, quality);
     const blobUrl = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = blobUrl;
@@ -338,8 +353,8 @@ export async function safeTriggerAudioDownload(
 /**
  * Legacy helper mapped to safeTriggerAudioDownload
  */
-export function triggerAudioDownload(soundId: string, customName?: string) {
-  void safeTriggerAudioDownload(soundId, customName);
+export function triggerAudioDownload(soundId: string, customName?: string, quality?: string) {
+  void safeTriggerAudioDownload(soundId, customName, undefined, quality);
 }
 
 /**
@@ -349,9 +364,10 @@ export async function fetchAudioBlob(
   soundId: string,
   onProgress?: (percent: number, loaded: number, total: number) => void,
   customName?: string,
-  preloadedInfo?: AudioFileInfo
+  preloadedInfo?: AudioFileInfo,
+  quality?: string
 ): Promise<{ blob: Blob; filename: string; format: string }> {
-  const info = preloadedInfo || (await fetchAudioInfo(soundId));
+  const info = preloadedInfo || (await fetchAudioInfo(soundId, quality));
   if (!info.success || info.isPaid) {
     throw new Error(
       info.error || 'Tập này yêu cầu Cookie tài khoản VIP đã mua trên MissEvan.'
@@ -381,7 +397,8 @@ export async function fetchAudioBlob(
         ? Math.min(currentStart + CHUNK_SIZE - 1, totalBytes - 1)
         : currentStart + CHUNK_SIZE - 1;
 
-    const url = `/api/missevan/audio/${soundId}/download?start=${currentStart}&end=${currentEnd}`;
+    const qualityQuery = quality ? `&quality=${encodeURIComponent(quality)}` : '';
+    const url = `/api/missevan/audio/${soundId}/download?start=${currentStart}&end=${currentEnd}${qualityQuery}`;
     const response = await fetch(url, { headers });
 
     if (!response.ok && response.status !== 206) {

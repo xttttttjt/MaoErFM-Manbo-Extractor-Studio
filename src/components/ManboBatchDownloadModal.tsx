@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   X,
   Loader2,
@@ -10,6 +10,7 @@ import {
   Download,
   Copy,
   Check,
+  Compass,
 } from 'lucide-react';
 import JSZip from 'jszip';
 import { KilaManboDramaDetail, KilaManboEpisode } from '../types/kilamanbo';
@@ -21,14 +22,20 @@ interface ManboBatchDownloadModalProps {
   isOpen: boolean;
   onClose: () => void;
   drama: KilaManboDramaDetail | null;
+  selectedEpisode?: KilaManboEpisode | null;
+  initialScope?: 'single' | 'series';
 }
 
 export const ManboBatchDownloadModal: React.FC<ManboBatchDownloadModalProps> = ({
   isOpen,
   onClose,
   drama,
+  selectedEpisode,
+  initialScope = 'series',
 }) => {
   const { language } = useLanguage();
+  const [scope, setScope] = useState<'single' | 'series'>(initialScope);
+  const [singleSelectedEpId, setSingleSelectedEpId] = useState<string>('');
   const [downloadType, setDownloadType] = useState<'subtitles' | 'covers' | 'audio' | 'all'>('all');
   const [selectedEpIds, setSelectedEpIds] = useState<Record<string, boolean>>({});
   const [isRunning, setIsRunning] = useState(false);
@@ -37,6 +44,19 @@ export const ManboBatchDownloadModal: React.FC<ManboBatchDownloadModalProps> = (
   const [statusLog, setStatusLog] = useState<
     { id: string; name: string; count: number; error?: string }[]
   >([]);
+
+  useEffect(() => {
+    if (isOpen) {
+      if (initialScope) {
+        setScope(initialScope);
+      }
+      if (selectedEpisode?.setIdStr) {
+        setSingleSelectedEpId(selectedEpisode.setIdStr);
+      } else if (drama?.setRespList?.[0]?.setIdStr) {
+        setSingleSelectedEpId(drama.setRespList[0].setIdStr);
+      }
+    }
+  }, [isOpen, initialScope, selectedEpisode?.setIdStr, drama?.setRespList]);
 
   if (!isOpen || !drama) return null;
 
@@ -72,7 +92,13 @@ export const ManboBatchDownloadModal: React.FC<ManboBatchDownloadModalProps> = (
   };
 
   const handleStartBatch = async () => {
-    const chosenEps = episodes.filter((e) => selectedEpIds[e.setIdStr] !== false);
+    let chosenEps: KilaManboEpisode[] = [];
+    if (scope === 'single') {
+      const target = episodes.find((e) => e.setIdStr === singleSelectedEpId) || selectedEpisode || episodes[0];
+      if (target) chosenEps = [target];
+    } else {
+      chosenEps = episodes.filter((e) => selectedEpIds[e.setIdStr] !== false);
+    }
     if (chosenEps.length === 0) return;
 
     setIsRunning(true);
@@ -81,7 +107,9 @@ export const ManboBatchDownloadModal: React.FC<ManboBatchDownloadModalProps> = (
 
     const zip = new JSZip();
     const dramaFolder = zip.folder(
-      `[KilaManbo]_${sanitizeFilename(drama.title)}_[${dramaId}]`
+      scope === 'single'
+        ? `[KilaManbo]_${sanitizeFilename(drama.title)}_${sanitizeFilename(chosenEps[0]?.setTitle || chosenEps[0]?.setName || 'Single')}`
+        : `[KilaManbo]_${sanitizeFilename(drama.title)}_[${dramaId}]`
     ) || zip;
 
     // Create a comprehensive Manifest & Metadata file in the root
@@ -270,15 +298,25 @@ export const ManboBatchDownloadModal: React.FC<ManboBatchDownloadModalProps> = (
 
     try {
       const zipBlob = await zip.generateAsync({ type: 'blob' });
-      const filename = `[KilaManbo]_${sanitizeFilename(drama.title)}_[DramaID_${dramaId}]_${
-        downloadType === 'covers'
-          ? 'Covers'
-          : downloadType === 'subtitles'
-          ? 'Subtitles'
-          : downloadType === 'audio'
-          ? 'Audio'
-          : 'Complete_Bundle'
-      }.zip`;
+      const filename = scope === 'single'
+        ? `[KilaManbo]_${sanitizeFilename(drama.title)}_${sanitizeFilename(chosenEps[0]?.setTitle || chosenEps[0]?.setName || 'Single')}_${
+            downloadType === 'covers'
+              ? 'Cover'
+              : downloadType === 'subtitles'
+              ? 'Subtitles'
+              : downloadType === 'audio'
+              ? 'Audio'
+              : 'Complete_Payload'
+          }.zip`
+        : `[KilaManbo]_${sanitizeFilename(drama.title)}_[DramaID_${dramaId}]_${
+            downloadType === 'covers'
+              ? 'Covers'
+              : downloadType === 'subtitles'
+              ? 'Subtitles'
+              : downloadType === 'audio'
+              ? 'Audio'
+              : 'Complete_Bundle'
+          }.zip`;
       downloadFile(zipBlob, filename);
     } catch (zipErr) {
       console.error('Failed to generate zip:', zipErr);
@@ -335,10 +373,83 @@ export const ManboBatchDownloadModal: React.FC<ManboBatchDownloadModalProps> = (
 
         {/* Content */}
         <div className="p-6 space-y-5 overflow-y-auto flex-1">
+          {/* Scope Toggle: Single Track vs Whole Series */}
+          <div className="p-1 rounded-xl bg-[#06160e] border border-[#143a25] flex items-center gap-1.5 shadow-inner">
+            <button
+              type="button"
+              onClick={() => setScope('single')}
+              disabled={isRunning}
+              className={`flex-1 py-2 px-3 rounded-lg text-xs font-bold transition-all cursor-pointer flex items-center justify-center gap-2 ${
+                scope === 'single'
+                  ? 'bg-gradient-to-r from-emerald-500 to-teal-400 text-slate-950 shadow-md font-extrabold'
+                  : 'text-slate-400 hover:text-emerald-300 hover:bg-[#0a2417]'
+              }`}
+            >
+              <Compass className="w-3.5 h-3.5" />
+              <span>{language === 'vi' ? 'Tập Lẻ (1 Single Track)' : '1 Single Track'}</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setScope('series')}
+              disabled={isRunning}
+              className={`flex-1 py-2 px-3 rounded-lg text-xs font-bold transition-all cursor-pointer flex items-center justify-center gap-2 ${
+                scope === 'series'
+                  ? 'bg-gradient-to-r from-emerald-500 to-teal-400 text-slate-950 shadow-md font-extrabold'
+                  : 'text-slate-400 hover:text-emerald-300 hover:bg-[#0a2417]'
+              }`}
+            >
+              <Layers className="w-3.5 h-3.5" />
+              <span>{language === 'vi' ? 'Toàn Bộ Kịch (Whole Series)' : 'Whole Drama Series'}</span>
+              <span className={`px-1.5 py-0.2 rounded-full text-[10px] font-mono border ${
+                scope === 'series'
+                  ? 'bg-slate-950/40 text-slate-950 border-slate-900/30'
+                  : 'bg-emerald-950 text-emerald-300 border-emerald-700/60'
+              }`}>
+                {episodes.length}
+              </span>
+            </button>
+          </div>
+
+          {/* If Single Track mode: Show single episode picker */}
+          {scope === 'single' && (
+            <div className="p-3.5 rounded-xl bg-[#030d07] border border-[#143a25] space-y-2 animate-in fade-in">
+              <div className="flex items-center justify-between text-xs font-semibold text-slate-300">
+                <span>{language === 'vi' ? 'Chọn tập cần xuất trọn gói:' : 'Select episode to package:'}</span>
+                {episodes.find((e) => e.setIdStr === singleSelectedEpId)?.setLrcUrl && (
+                  <span className="text-[11px] font-mono text-emerald-400 font-bold">
+                    ✓ Có phụ đề chính thức (.LRC)
+                  </span>
+                )}
+              </div>
+
+              <select
+                value={singleSelectedEpId}
+                onChange={(e) => setSingleSelectedEpId(e.target.value)}
+                disabled={isRunning}
+                className="w-full bg-[#05140c] border border-[#18422b] rounded-lg px-3 py-2 text-xs font-medium text-emerald-200 focus:outline-none focus:border-emerald-400 cursor-pointer"
+              >
+                {episodes.map((ep) => (
+                  <option key={ep.setIdStr} value={ep.setIdStr} className="bg-[#05140c] text-slate-200">
+                    #{String(ep.setNo).padStart(2, '0')} - {ep.setTitle || ep.setName} {ep.payType === 1 ? '[VIP]' : '[FREE]'} {ep.setLrcUrl ? '[LRC]' : ''}
+                  </option>
+                ))}
+              </select>
+
+              <div className="text-[11px] text-slate-400 pt-1 font-mono">
+                {language === 'vi'
+                  ? 'Gói tải tập lẻ sẽ bao gồm file âm thanh gốc (~500kbps), đầy đủ phụ đề (.LRC, .SRT, .VTT) và ảnh bìa chất lượng cao.'
+                  : 'Single track package includes decrypted audio (~500kbps), all subtitle formats (.LRC, .SRT, .VTT), and HD cover artwork.'}
+              </div>
+            </div>
+          )}
+
           {/* Format selection */}
           <div className="space-y-2">
             <label className="text-xs font-semibold text-slate-300 block">
-              {language === 'vi' ? 'Gói tải về từ Drama ID:' : 'Export Package from Drama ID:'}
+              {scope === 'single'
+                ? (language === 'vi' ? 'Chọn định dạng nội dung tập lẻ:' : 'Payload type for single track:')
+                : (language === 'vi' ? 'Gói tải về từ Drama ID:' : 'Export Package from Drama ID:')}
             </label>
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2">
               <button
@@ -354,7 +465,7 @@ export const ManboBatchDownloadModal: React.FC<ManboBatchDownloadModalProps> = (
                 <Layers className="w-5 h-5 text-emerald-400 shrink-0" />
                 <div>
                   <div className="text-xs font-bold text-white">
-                    {language === 'vi' ? 'Trọn Gói Kịch' : 'Full Drama Bundle'}
+                    {language === 'vi' ? (scope === 'single' ? 'Trọn Bộ Tập Này' : 'Trọn Gói Kịch') : (scope === 'single' ? 'Full Track Bundle' : 'Full Drama Bundle')}
                   </div>
                   <div className="text-[10px] text-slate-400 font-mono">Subs + Covers + Audio</div>
                 </div>
@@ -413,70 +524,76 @@ export const ManboBatchDownloadModal: React.FC<ManboBatchDownloadModalProps> = (
                   <div className="text-xs font-bold text-white">
                     {language === 'vi' ? 'Luồng Âm Thanh' : 'Audio Streams'}
                   </div>
-                  <div className="text-[10px] text-slate-400 font-mono">.MP4 / .MP3 HQ</div>
+                  <div className="text-[10px] text-slate-400 font-mono">.MP4 (~500kbps)</div>
                 </div>
               </button>
             </div>
           </div>
 
-          {/* Episode selection list */}
-          <div className="space-y-2">
-            <div className="flex items-center justify-between text-xs font-semibold text-slate-300">
-              <span className="flex items-center gap-1.5">
-                <span>{language === 'vi' ? 'Chọn tập phim cần tải' : 'Select episodes:'}</span>
-                <span className="text-[11px] font-mono text-emerald-400">
-                  ({episodes.filter((e) => selectedEpIds[e.setIdStr] !== false).length}/{episodes.length})
+          {/* Episode selection list - only in Whole Series mode */}
+          {scope === 'series' && (
+            <div className="space-y-2 animate-in fade-in">
+              <div className="flex items-center justify-between text-xs font-semibold text-slate-300">
+                <span className="flex items-center gap-1.5">
+                  <span>{language === 'vi' ? 'Chọn tập phim cần tải' : 'Select episodes:'}</span>
+                  <span className="text-[11px] font-mono text-emerald-400">
+                    ({episodes.filter((e) => selectedEpIds[e.setIdStr] !== false).length}/{episodes.length})
+                  </span>
                 </span>
-              </span>
-              <button
-                type="button"
-                onClick={toggleSelectAll}
-                disabled={isRunning}
-                className="text-xs text-emerald-400 hover:text-emerald-300 cursor-pointer font-bold"
-              >
-                {allSelected ? (language === 'vi' ? 'Bỏ chọn tất cả' : 'Deselect all') : (language === 'vi' ? 'Chọn tất cả' : 'Select all')}
-              </button>
-            </div>
+                <button
+                  type="button"
+                  onClick={toggleSelectAll}
+                  disabled={isRunning}
+                  className="text-xs text-emerald-400 hover:text-emerald-300 cursor-pointer font-bold"
+                >
+                  {allSelected ? (language === 'vi' ? 'Bỏ chọn tất cả' : 'Deselect all') : (language === 'vi' ? 'Chọn tất cả' : 'Select all')}
+                </button>
+              </div>
 
-            <div className="max-h-52 overflow-y-auto border border-[#143a25] bg-[#030906] rounded-xl p-2 space-y-1.5 scrollbar-thin scrollbar-thumb-emerald-950">
-              {episodes.map((ep) => {
-                const isChecked = selectedEpIds[ep.setIdStr] !== false;
-                return (
-                  <label
-                    key={ep.setIdStr}
-                    className={`flex items-center justify-between p-2 rounded-lg text-xs cursor-pointer transition-colors ${
-                      isChecked ? 'bg-[#081a10] text-white' : 'text-slate-400 hover:bg-[#06140c]'
-                    }`}
-                  >
-                    <div className="flex items-center gap-2.5 min-w-0">
-                      <input
-                        type="checkbox"
-                        checked={isChecked}
-                        onChange={() => toggleSelectOne(ep.setIdStr)}
-                        disabled={isRunning}
-                        className="rounded accent-emerald-500 cursor-pointer"
-                      />
-                      <span className="font-mono text-[11px] text-slate-500 shrink-0">
-                        #{String(ep.setNo).padStart(2, '0')}
-                      </span>
-                      <span className="font-semibold truncate">
-                        {ep.setTitle || ep.setName || `Tập ${ep.setNo}`}
-                      </span>
-                      {ep.payType === 1 && (
-                        <span className="px-1.5 py-0.2 rounded text-[9px] font-bold bg-amber-950/80 text-amber-300 border border-amber-800/60 font-mono shrink-0">
-                          VIP
+              <div className="max-h-52 overflow-y-auto border border-[#143a25] bg-[#030906] rounded-xl p-2 space-y-1.5 scrollbar-thin scrollbar-thumb-emerald-950">
+                {episodes.map((ep) => {
+                  const isChecked = selectedEpIds[ep.setIdStr] !== false;
+                  return (
+                    <label
+                      key={ep.setIdStr}
+                      className={`flex items-center justify-between p-2 rounded-lg text-xs cursor-pointer transition-colors ${
+                        isChecked ? 'bg-[#081a10] text-white' : 'text-slate-400 hover:bg-[#06140c]'
+                      }`}
+                    >
+                      <div className="flex items-center gap-2.5 min-w-0">
+                        <input
+                          type="checkbox"
+                          checked={isChecked}
+                          onChange={() => toggleSelectOne(ep.setIdStr)}
+                          disabled={isRunning}
+                          className="rounded accent-emerald-500 cursor-pointer"
+                        />
+                        <span className="font-mono text-[11px] text-slate-500 shrink-0">
+                          #{String(ep.setNo).padStart(2, '0')}
                         </span>
-                      )}
-                    </div>
-                    <div className="flex items-center gap-2 text-[10px] text-slate-400 font-mono shrink-0">
-                      {ep.setLrcUrl && <span className="text-emerald-400">✓ LRC</span>}
-                      <span>ID: {ep.setIdStr}</span>
-                    </div>
-                  </label>
-                );
-              })}
+                        <span className="font-semibold truncate">
+                          {ep.setTitle || ep.setName}
+                        </span>
+                        {ep.setLrcUrl && (
+                          <span className="px-1.5 py-0.2 rounded text-[9px] font-bold bg-emerald-900/60 text-emerald-300 border border-emerald-500/40 shrink-0">
+                            LRC
+                          </span>
+                        )}
+                        {ep.payType === 1 && (
+                          <span className="px-1.5 py-0.2 rounded text-[9px] font-bold bg-amber-950/80 text-amber-300 border border-amber-600/40 shrink-0">
+                            VIP
+                          </span>
+                        )}
+                      </div>
+                      <span className="text-[11px] font-mono text-slate-500 shrink-0 pl-2">
+                        {Math.floor((ep.duration || 0) / 60000)}m{Math.floor(((ep.duration || 0) % 60000) / 1000)}s
+                      </span>
+                    </label>
+                  );
+                })}
+              </div>
             </div>
-          </div>
+          )}
 
           {/* Progress bar */}
           {isRunning && (
@@ -547,7 +664,11 @@ export const ManboBatchDownloadModal: React.FC<ManboBatchDownloadModalProps> = (
             <button
               type="button"
               onClick={handleStartBatch}
-              disabled={isRunning || episodes.filter((e) => selectedEpIds[e.setIdStr] !== false).length === 0}
+              disabled={
+                isRunning ||
+                (scope === 'series' && episodes.filter((e) => selectedEpIds[e.setIdStr] !== false).length === 0) ||
+                (scope === 'single' && !singleSelectedEpId && !selectedEpisode)
+              }
               className="px-5 py-2 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-400 hover:from-emerald-400 hover:to-teal-300 text-slate-950 text-xs font-bold flex items-center gap-2 cursor-pointer transition-all shadow-lg shadow-emerald-950/40 disabled:opacity-50"
             >
               {isRunning ? (
@@ -558,7 +679,11 @@ export const ManboBatchDownloadModal: React.FC<ManboBatchDownloadModalProps> = (
               ) : (
                 <>
                   <Download className="w-4 h-4" />
-                  <span>{language === 'vi' ? 'Tải Gói ZIP' : 'Download ZIP Package'}</span>
+                  <span>
+                    {scope === 'single'
+                      ? (language === 'vi' ? 'Tải Trọn Gói Tập Này (.ZIP)' : 'Download Single Track (.ZIP)')
+                      : (language === 'vi' ? 'Tải Toàn Bộ Kịch (.ZIP)' : 'Download Whole Series (.ZIP)')}
+                  </span>
                 </>
               )}
             </button>

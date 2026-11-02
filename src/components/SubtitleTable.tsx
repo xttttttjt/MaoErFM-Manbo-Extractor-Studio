@@ -15,6 +15,7 @@ import {
 import { MissEvanDanmakuItem } from '../types/missevan';
 import { formatTime } from '../utils/parser';
 import { useLanguage } from '../context/LanguageContext';
+import { isTranslationUnlocked } from './TranslationAdvisoryBarrier';
 
 export type SubtitleDisplayMode = 'bilingual' | 'translated' | 'original';
 
@@ -74,6 +75,12 @@ export const SubtitleTable: React.FC<SubtitleTableProps> = ({
   };
 
   const handleQuickTranslate = async (item: MissEvanDanmakuItem) => {
+    if (!isTranslationUnlocked()) {
+      if (onOpenTranslateModal) {
+        onOpenTranslateModal();
+      }
+      return;
+    }
     if (!onQuickTranslateLine || translatingId) return;
     setTranslatingId(item.id);
     try {

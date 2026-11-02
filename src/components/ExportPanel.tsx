@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   FileText,
   Archive,
@@ -11,6 +11,7 @@ import {
   Loader2,
   Image as ImageIcon,
   Plane,
+  Layers,
 } from 'lucide-react';
 import { MissEvanDanmakuItem, MissEvanSoundInfo } from '../types/missevan';
 import {
@@ -31,7 +32,7 @@ import {
   downloadAllAsZip,
   sanitizeFilename,
 } from '../utils/formatter';
-import { safeTriggerAudioDownload } from '../utils/audioDownloader';
+import { safeTriggerAudioDownload, fetchAudioInfo, formatFileSize, AudioFileInfo } from '../utils/audioDownloader';
 import { getCoverFilename, downloadCoverImage, getHighResCoverUrl } from '../utils/coverDownloader';
 import { useLanguage } from '../context/LanguageContext';
 import { Languages, Sparkles } from 'lucide-react';
@@ -51,6 +52,7 @@ interface ExportPanelProps {
   customAudioError?: string | null;
   isVipLocked?: boolean;
   onOpenVipModal?: () => void;
+  onOpenBatchModal?: () => void;
   theme?: 'missevan' | 'kilamanbo';
 }
 
@@ -69,9 +71,10 @@ export const ExportPanel: React.FC<ExportPanelProps> = ({
   customAudioError,
   isVipLocked,
   onOpenVipModal,
+  onOpenBatchModal,
   theme = 'missevan',
 }) => {
-  const { t } = useLanguage();
+  const { t, language } = useLanguage();
   const [copiedFormat, setCopiedFormat] = useState<string | null>(null);
   const [isZipping, setIsZipping] = useState(false);
   const [isAudioDownloading, setIsAudioDownloading] = useState(false);
@@ -79,8 +82,19 @@ export const ExportPanel: React.FC<ExportPanelProps> = ({
   const [audioDownloaded, setAudioDownloaded] = useState(false);
   const [audioNotice, setAudioNotice] = useState<string | null>(null);
   const [coverDownloaded, setCoverDownloaded] = useState(false);
+  const [audioMeta, setAudioMeta] = useState<AudioFileInfo | null>(null);
 
   const isGreen = theme === 'kilamanbo';
+
+  useEffect(() => {
+    if (soundInfo?.id && theme !== 'kilamanbo') {
+      fetchAudioInfo(String(soundInfo.id))
+        .then((info) => setAudioMeta(info))
+        .catch(() => {});
+    } else {
+      setAudioMeta(null);
+    }
+  }, [soundInfo?.id, theme]);
 
   const baseTitle = customBaseTitle
     ? sanitizeFilename(customBaseTitle)
@@ -197,19 +211,43 @@ export const ExportPanel: React.FC<ExportPanelProps> = ({
           </h3>
         </div>
 
-        <button
-          type="button"
-          onClick={handleDownloadZip}
-          disabled={isZipping || items.length === 0}
-          className={`px-5 py-2.5 text-xs font-bold rounded-xl transition-all shadow-lg flex items-center gap-2 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed shrink-0 ${
-            isGreen
-              ? 'bg-gradient-to-r from-emerald-500 via-teal-400 to-emerald-500 hover:from-emerald-400 hover:to-teal-300 text-slate-950 shadow-emerald-950/60'
-              : 'bg-gradient-to-r from-sky-500 via-cyan-400 to-sky-500 hover:from-sky-400 hover:to-cyan-300 text-slate-950 shadow-sky-950/60'
-          }`}
-        >
-          <Archive className="w-4 h-4" />
-          <span>{isZipping ? t('compressingZip') : t('downloadAllZip')}</span>
-        </button>
+        <div className="flex flex-wrap items-center gap-2">
+          {onOpenBatchModal && (
+            <button
+              type="button"
+              onClick={onOpenBatchModal}
+              className={`px-4 py-2.5 text-xs font-bold rounded-xl transition-all shadow-md flex items-center gap-1.5 cursor-pointer shrink-0 ${
+                isGreen
+                  ? 'bg-[#082416] hover:bg-[#0c3320] text-emerald-300 border border-emerald-600/50 shadow-emerald-950/40'
+                  : 'bg-[#0a1832] hover:bg-[#0f244a] text-sky-300 border border-sky-600/50 shadow-sky-950/40'
+              }`}
+              title={isGreen ? 'Tải hàng loạt toàn bộ kịch hoặc từng tập' : 'Batch download entire drama series'}
+            >
+              <Layers className="w-4 h-4" />
+              <span>{isGreen ? (language === 'vi' ? 'Toàn Bộ Kịch (.ZIP)' : 'Whole Series (.ZIP)') : t('batchSubtitles')}</span>
+            </button>
+          )}
+
+          <button
+            type="button"
+            onClick={handleDownloadZip}
+            disabled={isZipping || items.length === 0}
+            className={`px-5 py-2.5 text-xs font-bold rounded-xl transition-all shadow-lg flex items-center gap-2 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed shrink-0 ${
+              isGreen
+                ? 'bg-gradient-to-r from-emerald-500 via-teal-400 to-emerald-500 hover:from-emerald-400 hover:to-teal-300 text-slate-950 shadow-emerald-950/60'
+                : 'bg-gradient-to-r from-sky-500 via-cyan-400 to-sky-500 hover:from-sky-400 hover:to-cyan-300 text-slate-950 shadow-sky-950/60'
+            }`}
+          >
+            <Archive className="w-4 h-4" />
+            <span>
+              {isZipping
+                ? t('compressingZip')
+                : onOpenBatchModal
+                ? (isGreen ? (language === 'vi' ? 'Tập Này (.ZIP)' : 'Single Track (.ZIP)') : t('downloadAllZip'))
+                : t('downloadAllZip')}
+            </span>
+          </button>
+        </div>
       </div>
 
       {/* Featured Audio Track Download Strip */}
@@ -237,7 +275,11 @@ export const ExportPanel: React.FC<ExportPanelProps> = ({
                     ? 'bg-emerald-950/80 text-emerald-300 border-emerald-700/60'
                     : 'bg-sky-950/80 text-sky-300 border-sky-700/60'
                 }`}>
-                  {isGreen ? 'KilaManbo Audio' : t('audioQualityBadge')}
+                  {isGreen
+                    ? 'KilaManbo Audio (~500 kbps)'
+                    : audioMeta?.bitrateKbps
+                    ? `M4A · ${audioMeta.bitrateKbps} kbps ${audioMeta.bitrateKbps >= 300 ? 'Master' : 'HQ'}`
+                    : t('audioQualityBadge')}
                 </span>
                 {isVipLocked && (
                   <span className="px-2 py-0.5 rounded-full text-[10px] font-bold font-mono bg-amber-950/90 text-amber-300 border border-amber-700/60 shrink-0">
@@ -247,6 +289,7 @@ export const ExportPanel: React.FC<ExportPanelProps> = ({
               </div>
               <p className="text-xs text-slate-400 truncate mt-0.5 font-mono">
                 {soundInfo.soundstr || `ID ${soundInfo.id}`}
+                {audioMeta?.contentLength ? ` · ${formatFileSize(audioMeta.contentLength)}` : ''}
               </p>
             </div>
           </div>

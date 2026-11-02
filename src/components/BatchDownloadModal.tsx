@@ -138,7 +138,7 @@ export const BatchDownloadModal: React.FC<BatchDownloadModalProps> = ({
           const info = await fetchAudioInfo(soundId);
           if (info.success && !info.isPaid) {
             try {
-              const { blob, filename } = await fetchAudioBlob(soundId);
+              const { blob, filename } = await fetchAudioBlob(soundId, undefined, undefined, info);
               folder.file(filename, blob);
             } catch {
               // ignore

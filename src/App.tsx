@@ -404,12 +404,20 @@ export default function App() {
 
   // Quick single-line translation on demand
   const handleQuickTranslateLine = async (item: MissEvanDanmakuItem) => {
+    let savedEngine = 'gemini';
+    try {
+      savedEngine = localStorage.getItem('subtitle_translation_engine') || 'gemini';
+    } catch {
+      // ignore
+    }
+
     const res = await fetch('/api/subtitles/translate', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         items: [{ id: item.id, text: item.text, role: item.role }],
         targetLang,
+        engine: savedEngine,
         dramaContext: soundInfo?.soundstr,
       }),
     });

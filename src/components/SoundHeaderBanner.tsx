@@ -362,6 +362,8 @@ export const SoundHeaderBanner: React.FC<SoundHeaderBannerProps> = ({
                   {isDownloading
                     ? `${t('downloadingAudio')} (${downloadProgress}%)`
                     : `${t('downloadAudio')} (${audioInfo?.format?.toUpperCase() || 'M4A'}${
+                        audioInfo?.bitrateKbps ? ` · ${audioInfo.bitrateKbps}kbps` : ''
+                      }${
                         audioInfo?.contentLength ? ` · ${formatFileSize(audioInfo.contentLength)}` : ''
                       })`}
                 </span>

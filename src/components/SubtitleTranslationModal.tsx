@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   X,
   Languages,
@@ -12,6 +12,10 @@ import {
   Plane,
   Eye,
   RefreshCw,
+  Globe,
+  ShieldAlert,
+  Info,
+  Lock,
 } from 'lucide-react';
 import { MissEvanDanmakuItem, MissEvanSoundInfo } from '../types/missevan';
 import {
@@ -27,6 +31,13 @@ import {
   sanitizeFilename,
 } from '../utils/formatter';
 import { useLanguage } from '../context/LanguageContext';
+import {
+  TranslationAdvisoryBarrier,
+  SubtitleTranslationEngine,
+  isTranslationUnlocked,
+  lockTranslationTool,
+  ENGINE_STORAGE_KEY,
+} from './TranslationAdvisoryBarrier';
 
 export type SubtitleTargetLanguage = 'vi' | 'en' | 'es';
 
@@ -53,6 +64,30 @@ export const SubtitleTranslationModal: React.FC<SubtitleTranslationModalProps> =
   const isGreen = platform === 'kilamanbo';
   const appNameText = isGreen ? 'KilaManbo' : 'MissEvan';
 
+  const [engine, setEngine] = useState<SubtitleTranslationEngine>(() => {
+    try {
+      const saved = localStorage.getItem(ENGINE_STORAGE_KEY);
+      return saved === 'google' ? 'google' : 'gemini';
+    } catch {
+      return 'gemini';
+    }
+  });
+
+  const [isUnlocked, setIsUnlocked] = useState<boolean>(() => isTranslationUnlocked());
+
+  useEffect(() => {
+    const handleUnlocked = () => setIsUnlocked(true);
+    const handleLocked = () => setIsUnlocked(false);
+    window.addEventListener('subtitle-translation-unlocked', handleUnlocked);
+    window.addEventListener('subtitle-translation-locked', handleLocked);
+    return () => {
+      window.removeEventListener('subtitle-translation-unlocked', handleUnlocked);
+      window.removeEventListener('subtitle-translation-locked', handleLocked);
+    };
+  }, []);
+
+  const [showAdvisoryModal, setShowAdvisoryModal] = useState(false);
+
   const [targetLang, setTargetLang] = useState<SubtitleTargetLanguage>('vi');
   const [dramaContext, setDramaContext] = useState('');
   const [isTranslating, setIsTranslating] = useState(false);
@@ -60,6 +95,25 @@ export const SubtitleTranslationModal: React.FC<SubtitleTranslationModalProps> =
   const [translatedItems, setTranslatedItems] = useState<Record<string, { text: string; role?: string }>>({});
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [appliedToast, setAppliedToast] = useState(false);
+
+  const handleSelectEngine = (newEngine: SubtitleTranslationEngine) => {
+    setEngine(newEngine);
+    try {
+      localStorage.setItem(ENGINE_STORAGE_KEY, newEngine);
+    } catch {
+      // ignore
+    }
+  };
+
+  const handleDismissAdvisory = () => {
+    setIsUnlocked(true);
+    setShowAdvisoryModal(false);
+  };
+
+  const handleLockTool = () => {
+    lockTranslationTool();
+    setIsUnlocked(false);
+  };
 
   if (!isOpen) return null;
 
@@ -109,6 +163,7 @@ export const SubtitleTranslationModal: React.FC<SubtitleTranslationModalProps> =
           body: JSON.stringify({
             items: chunk,
             targetLang,
+            engine,
             dramaContext: dramaContext.trim() || undefined,
           }),
         });
@@ -224,19 +279,134 @@ export const SubtitleTranslationModal: React.FC<SubtitleTranslationModalProps> =
               </h2>
             </div>
           </div>
-          <button
-            type="button"
-            onClick={onClose}
-            className={`p-1.5 rounded-lg text-slate-400 hover:text-white transition-colors cursor-pointer ${
-              isGreen ? 'hover:bg-[#0c2415]' : 'hover:bg-[#122340]'
-            }`}
-          >
-            <X className="w-5 h-5" />
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setShowAdvisoryModal(true)}
+              className="px-2.5 py-1.5 rounded-lg border flex items-center gap-1.5 text-xs font-semibold cursor-pointer transition-colors bg-amber-500/15 border-amber-500/35 text-amber-300 hover:bg-amber-500/25"
+              title={language === 'vi' ? 'Xem lưu ý về AI (Gemini) và Google Translate' : 'View AI & Google Translate Advisory'}
+            >
+              <ShieldAlert className="w-3.5 h-3.5 text-amber-400" />
+              <span className="hidden sm:inline font-mono">
+                {language === 'vi' ? 'Lưu Ý AI' : 'AI Advisory'}
+              </span>
+            </button>
+
+            {isUnlocked && (
+              <button
+                type="button"
+                onClick={handleLockTool}
+                className="px-2.5 py-1.5 rounded-lg border flex items-center gap-1.5 text-xs font-semibold cursor-pointer transition-colors bg-slate-900 hover:bg-slate-800 border-slate-700 text-slate-400 hover:text-white"
+                title={language === 'vi' ? 'Khóa lại công cụ dịch phụ đề' : 'Lock translator'}
+              >
+                <Lock className="w-3.5 h-3.5 text-slate-400" />
+                <span className="hidden sm:inline font-mono">{language === 'vi' ? 'Khóa' : 'Lock'}</span>
+              </button>
+            )}
+
+            <button
+              type="button"
+              onClick={onClose}
+              className={`p-1.5 rounded-lg text-slate-400 hover:text-white transition-colors cursor-pointer ${
+                isGreen ? 'hover:bg-[#0c2415]' : 'hover:bg-[#122340]'
+              }`}
+            >
+              <X className="w-5 h-5" />
+            </button>
+          </div>
         </div>
 
-        {/* Modal Body */}
-        <div className="p-5 sm:p-6 overflow-y-auto space-y-6 flex-1 text-slate-300 text-xs">
+        {/* Modal Body - Blurred when locked */}
+        <div className={`p-5 sm:p-6 overflow-y-auto space-y-6 flex-1 text-slate-300 text-xs transition-all duration-500 ${
+          !isUnlocked ? 'filter blur-md select-none pointer-events-none opacity-25' : ''
+        }`}>
+          {/* Translation Engine Option Switcher */}
+          <div className="space-y-2">
+            <div className="flex items-center justify-between">
+              <label className={`block text-xs font-heading font-semibold uppercase tracking-wider ${
+                isGreen ? 'text-emerald-300' : 'text-sky-200'
+              }`}>
+                {language === 'vi' ? 'Động Cơ Dịch / Engine Switcher' : 'Translation Engine Switcher'}
+              </label>
+              <button
+                type="button"
+                onClick={() => setShowAdvisoryModal(true)}
+                className="inline-flex items-center gap-1 text-[11px] text-amber-400 hover:text-amber-300 transition-colors cursor-pointer"
+              >
+                <ShieldAlert className="w-3.5 h-3.5 text-amber-400" />
+                <span>{language === 'vi' ? 'Lưu ý ngừa sai lệch nghĩa' : 'Accuracy warning'}</span>
+              </button>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              {/* Google Translate Engine Option */}
+              <button
+                type="button"
+                onClick={() => handleSelectEngine('google')}
+                className={`p-3.5 rounded-xl border text-left transition-all cursor-pointer flex items-start justify-between gap-3 ${
+                  engine === 'google'
+                    ? isGreen
+                      ? 'bg-emerald-500/20 border-emerald-400 text-white shadow-md shadow-emerald-950/60 ring-1 ring-emerald-400/50'
+                      : 'bg-sky-500/20 border-sky-400 text-white shadow-md shadow-sky-950/50 ring-1 ring-sky-400/50'
+                    : isGreen
+                      ? 'bg-[#05140b] border-[#143a25] text-slate-300 hover:border-emerald-600/50 hover:bg-[#082012]'
+                      : 'bg-[#091326] border-[#182c4c] text-slate-300 hover:border-sky-700/50 hover:bg-[#0c1a33]'
+                }`}
+              >
+                <div className="space-y-1">
+                  <div className="flex items-center gap-2">
+                    <Globe className={`w-4 h-4 shrink-0 ${engine === 'google' ? (isGreen ? 'text-emerald-400' : 'text-sky-400') : 'text-slate-400'}`} />
+                    <span className="font-heading font-bold text-sm text-white">Google Translate</span>
+                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-950 border border-emerald-500/40 text-emerald-300 font-mono font-bold">
+                      {language === 'vi' ? 'SÁT NGHĨA' : 'LITERAL'}
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-slate-400 leading-relaxed">
+                    {language === 'vi'
+                      ? 'Dịch sát nghĩa nguyên văn, không phóng tác, bảo đảm 100% không bị chế nghĩa so với nguyên tác.'
+                      : 'Strict verbatim dictionary translation, preventing AI hallucinated or invented meanings.'}
+                  </p>
+                </div>
+                {engine === 'google' && (
+                  <Check className={`w-4 h-4 shrink-0 mt-0.5 ${isGreen ? 'text-emerald-400' : 'text-sky-400'}`} />
+                )}
+              </button>
+
+              {/* Gemini AI Engine Option */}
+              <button
+                type="button"
+                onClick={() => handleSelectEngine('gemini')}
+                className={`p-3.5 rounded-xl border text-left transition-all cursor-pointer flex items-start justify-between gap-3 ${
+                  engine === 'gemini'
+                    ? isGreen
+                      ? 'bg-emerald-500/20 border-emerald-400 text-white shadow-md shadow-emerald-950/60 ring-1 ring-emerald-400/50'
+                      : 'bg-sky-500/20 border-sky-400 text-white shadow-md shadow-sky-950/50 ring-1 ring-sky-400/50'
+                    : isGreen
+                      ? 'bg-[#05140b] border-[#143a25] text-slate-300 hover:border-emerald-600/50 hover:bg-[#082012]'
+                      : 'bg-[#091326] border-[#182c4c] text-slate-300 hover:border-sky-700/50 hover:bg-[#0c1a33]'
+                }`}
+              >
+                <div className="space-y-1">
+                  <div className="flex items-center gap-2">
+                    <Sparkles className={`w-4 h-4 shrink-0 ${engine === 'gemini' ? (isGreen ? 'text-emerald-400' : 'text-sky-400') : 'text-slate-400'}`} />
+                    <span className="font-heading font-bold text-sm text-white">Gemini AI</span>
+                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-cyan-950 border border-cyan-500/40 text-cyan-300 font-mono font-bold">
+                      {language === 'vi' ? 'VĂN PHONG KỊCH' : 'DRAMA VOICE'}
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-slate-400 leading-relaxed">
+                    {language === 'vi'
+                      ? 'Dịch biểu cảm kịch truyền thanh, đại từ linh hoạt. Lưu ý: AI có thể tự suy diễn hoặc chế thêm ngữ cảnh.'
+                      : 'Expressive audio drama dialogue and fluid character tones. Note: AI may infer new nuances.'}
+                  </p>
+                </div>
+                {engine === 'gemini' && (
+                  <Check className={`w-4 h-4 shrink-0 mt-0.5 ${isGreen ? 'text-emerald-400' : 'text-sky-400'}`} />
+                )}
+              </button>
+            </div>
+          </div>
+
           {/* Target Language Selection Tabs */}
           <div>
             <label className={`block text-xs font-heading font-semibold mb-2 ${
@@ -752,6 +922,18 @@ export const SubtitleTranslationModal: React.FC<SubtitleTranslationModalProps> =
           </div>
         </div>
       </div>
+
+      {/* Advisory Blur Barrier (shown before first access, when locked, or on demand) */}
+      {(!isUnlocked || showAdvisoryModal) && (
+        <TranslationAdvisoryBarrier
+          platform={platform}
+          currentEngine={engine}
+          onSelectEngine={handleSelectEngine}
+          onDismiss={handleDismissAdvisory}
+          onClose={isUnlocked ? () => setShowAdvisoryModal(false) : undefined}
+          isInlineOverlay={false}
+        />
+      )}
     </div>
   );
 };
